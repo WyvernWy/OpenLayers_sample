@@ -45,17 +45,26 @@
     <p>Displaying WMS and WFS layers from GeoServer with PostgreSQL RDS backend</p>
     
     <div class="controls">
-        <label for="layer-select">Select Layer:</label>
+        <label for="layer-select">GeoServer Service Presentation:</label>
         <select id="layer-select">
             <option value="wms">WMS Layer (Raster)</option>
             <option value="wfs">WFS Layer (Vector)</option>
             <option value="both">Both Layers</option>
         </select>
+        <div style="margin-top: 15px;">
+            <label for="user-input">Describe the city:</label>
+            <input type="text" id="user-input" placeholder="e.g., US Capital">
+            <button id="submit-request">Search</button>
+        </div>
         <button id="refresh-btn">Refresh Map</button>
     </div>
     
     <div class="map-container">
         <div id="map"></div>
+    </div>
+    <div class="controls" style="margin-top: 20px; display: none">
+        <label for="api-response">API Response:</label>
+        <textarea id="api-response" rows="5" style="width: 100%;" readonly></textarea>
     </div>
 
     <script>
@@ -126,11 +135,13 @@
         
         // Refresh button
         document.getElementById('refresh-btn').addEventListener('click', function() {
-            if (wmsLayer.getVisible()) {
-                wmsLayer.getSource().updateParams({
+            // Refresh OpenStreetMap basemap
+            baseLayer.getSource().refresh();
+            
+            // Refresh WMS/WFS layers
+            wmsLayer.getSource().updateParams({
                     'TIME': Date.now()
                 });
-            }
             
             if (wfsLayer.getVisible()) {
                 wfsLayer.getSource().clear();
@@ -176,6 +187,100 @@
             const pixel = map.getEventPixel(e.originalEvent);
             const hit = map.hasFeatureAtPixel(pixel);
             map.getTargetElement().style.cursor = hit ? 'pointer' : '';
+        });
+    </script>
+    <script>
+        document.getElementById('submit-request').addEventListener('click', async () => {
+            const userInput = document.getElementById('user-input').value;
+            if (!userInput) {
+                alert('Please enter a request');
+                return;
+            }
+
+            // Call DeepSeek API to parse user input
+            const deepseekResponse = await fetch('https://api.deepseek.com/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer sk-cdbce476cbaf4690b7eafad1853fc16d'
+                },
+                body: JSON.stringify({
+                    model: 'deepseek-chat',
+                    messages: [
+                        {
+                            role: 'system',
+                            content: '你必须是返回标准的地理位置格式：城市名称,州/省名称,国家名称。例如：Boston, Massachusetts, USA 或 上海,中国'
+                        },
+                        {
+                            role: 'user',
+                            content: `Extract the location from the following request in the exact format "City, State, Country": ${userInput}`
+                        }
+                    ],
+                    temperature: 0.3
+                })
+            });
+
+            if (!deepseekResponse.ok) {
+                const errorMessage = `API 请求失败: ${deepseekResponse.status}`;
+                document.getElementById('api-response').textContent = errorMessage;
+                throw new Error(errorMessage);
+            }
+            const deepseekData = await deepseekResponse.json();
+            const locationString = deepseekData.choices[0].message.content;
+            document.getElementById('api-response').textContent = `标准化地址: ${locationString}\n\n原始API响应:\n${JSON.stringify(deepseekData, null, 2)}`;
+            
+            // Use Nominatim to geocode the location string
+            let geocodeResponse = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(locationString)}&format=json&addressdetails=1`);
+            let geocodeData = await geocodeResponse.json();
+            
+            if (!geocodeResponse.ok || geocodeData.length === 0) {
+                document.getElementById('api-response').textContent += '\n\n错误：无法解析该地址坐标';
+                return;
+            }
+            
+            // Filter low quaility results
+            geocodeData = geocodeData.filter(item => item.importance > 0.5);
+            
+            // Try parsing the original user input if no good results found
+            if (geocodeData.length === 0) {
+                geocodeResponse = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(parsedRequest)}&format=json`);
+                geocodeData = await geocodeResponse.json();
+                geocodeData = geocodeData.filter(item => item.importance > 0.5);
+            }
+            
+            if (!geocodeResponse.ok) {
+                throw new Error(`地理编码失败: ${geocodeResponse.status}`);
+            }
+            
+            if (geocodeData.length === 0) {
+                document.getElementById('api-response').textContent = '错误：未找到匹配的地点，请尝试更具体的名称（如"北京天安门"）';
+                return;
+            }
+            
+            // Obtain longitude and latitude from the first result
+            const lon = parseFloat(geocodeData[0].lon);
+            const lat = parseFloat(geocodeData[0].lat);
+            
+            // Pan the map to the new location
+            map.getView().setCenter(ol.proj.fromLonLat([lon, lat]));
+            map.getView().setZoom(12);
+            
+            // Declare vector source and layer to show the point
+            const vectorSource = new ol.source.Vector();
+            
+            const vectorLayer = new ol.layer.Vector({
+                source: vectorSource,
+                style: new ol.style.Style({
+                    image: new ol.style.Circle({
+                        radius: 6,
+                        fill: new ol.style.Fill({
+                            color: 'red'
+                        })
+                    })
+                })
+            });
+
+            map.addLayer(vectorLayer);
         });
     </script>
 </body>
